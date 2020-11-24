@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <EGL/egl.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
@@ -53,7 +54,9 @@ private:
   int screen_height_;
   int physical_width_              = 0;
   int physical_height_             = 0;
+  int32_t refresh_                 = 50000;
   bool window_metrix_skipped_      = false;
+  std::atomic<intptr_t> baton_     = 0;
   wl_display *display_             = nullptr;
   wl_registry *registry_           = nullptr;
   wl_compositor *compositor_       = nullptr;

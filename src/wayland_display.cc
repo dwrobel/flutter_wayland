@@ -337,7 +337,9 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
         [](void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, wl_output, flags, wd->screen_width_, width, wd->screen_height_, height, refresh);
+          wd->refresh_ = refresh;
+
+          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, wl_output, flags, wd->screen_width_, width, wd->screen_height_, height, wd->refresh_);
 
           if (wd->engine_) {
             FlutterWindowMetricsEvent event = {};
@@ -429,7 +431,10 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
   };
   config.open_gl.present = [](void *data) -> bool {
     WaylandDisplay *const wd = get_wayland_display(data);
-
+    static auto t0           = FlutterEngineGetCurrentTime();
+    const auto t1            = FlutterEngineGetCurrentTime();
+    printf("[%ju]: eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1e9);
+    t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
       FLWAY_ERROR << "Could not swap the EGL buffer." << std::endl;
@@ -482,11 +487,16 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
   }
 
   FlutterProjectArgs args = {
-      .struct_size                               = sizeof(FlutterProjectArgs),
-      .assets_path                               = bundle_path.c_str(),
-      .icu_data_path                             = icu_data_path.c_str(),
-      .command_line_argc                         = static_cast<int>(command_line_args_c.size()),
-      .command_line_argv                         = command_line_args_c.data(),
+      .struct_size       = sizeof(FlutterProjectArgs),
+      .assets_path       = bundle_path.c_str(),
+      .icu_data_path     = icu_data_path.c_str(),
+      .command_line_argc = static_cast<int>(command_line_args_c.size()),
+      .command_line_argv = command_line_args_c.data(),
+      .vsync_callback    = [](void *data, intptr_t baton) -> void {
+        printf("[%ju]: vsync: data: %p, baton: %p\n", FlutterEngineGetCurrentTime(), data, reinterpret_cast<void *>(baton));
+        WaylandDisplay *const wd = get_wayland_display(data);
+        wd->baton_               = baton;
+      },
       .compute_platform_resolved_locale_callback = [](const FlutterLocale **supported_locales, size_t number_of_locales) -> const FlutterLocale * {
         printf("compute_platform_resolved_locale_callback: number_of_locales: %zu\n", number_of_locales);
 
@@ -622,6 +632,8 @@ bool WaylandDisplay::Run() {
   const int fd = wl_display_get_fd(display_);
 
   while (valid_) {
+    const double vblank_time_ns = 1e12 / refresh_;
+
     while (wl_display_prepare_read(display_) < 0) {
       wl_display_dispatch_pending(display_);
     }
@@ -633,7 +645,7 @@ bool WaylandDisplay::Run() {
     do {
       struct pollfd fds = {.fd = fd, .events = POLLIN};
 
-      rv = poll(&fds, 1, 1);
+      rv = poll(&fds, 1, vblank_time_ns / 1000000);
     } while (rv == -1 && rv == EINTR);
 
     if (rv <= 0) {
@@ -643,6 +655,27 @@ bool WaylandDisplay::Run() {
     }
 
     wl_display_dispatch_pending(display_);
+
+    if (wl_display_get_error(display_) == 0) {
+      wl_display_roundtrip(display_);
+    }
+
+    intptr_t baton = baton_;
+    baton_         = 0;
+
+    if (baton != 0) {
+      const auto t0                 = FlutterEngineGetCurrentTime();
+      const uint64_t current_ns     = t0;
+      const uint64_t finish_time_ns = current_ns + vblank_time_ns;
+
+      printf("[%ju]: baton: %p\n", t0, reinterpret_cast<void *>(baton));
+      const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
+
+      if (status != kSuccess) {
+        printf("[%ju]: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
+        exit(1);
+      }
+    }
   }
 
   return true;
