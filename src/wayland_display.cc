@@ -7,6 +7,10 @@
 #define WL_EGL_PLATFORM 1
 #endif
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
 #include <chrono>
 #include <sstream>
 #include <vector>
@@ -372,6 +376,11 @@ WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &b
     return;
   }
 
+  if (socketpair(AF_LOCAL, SOCK_DGRAM, 0, &sv_[0]) == -1) {
+    FLWAY_ERROR << "socketpair() failed, errno: " << errno << std::endl;
+    return;
+  }
+
   display_ = wl_display_connect(nullptr);
 
   if (!display_) {
@@ -684,9 +693,17 @@ bool WaylandDisplay::Run() {
     int rv;
 
     do {
-      struct pollfd fds = {.fd = fd, .events = POLLIN};
+      struct pollfd fds[2] = {
+          {.fd = fd, .events = POLLIN},
+          {.fd = sv_[1], .events = POLLIN},
+      };
 
-      rv = poll(&fds, 1, vblank_time_ns / 1000000);
+      const struct timespec ts = {
+          .tv_sec  = 0,
+          .tv_nsec = static_cast<decltype(ts.tv_nsec)>(vblank_time_ns),
+      };
+
+      rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
     } while (rv == -1 && rv == EINTR);
 
     if (rv <= 0) {

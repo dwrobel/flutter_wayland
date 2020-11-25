@@ -60,6 +60,7 @@ private:
   bool window_metrix_skipped_       = false;
   std::atomic<intptr_t> baton_      = 0;
   std::atomic<uint64_t> last_frame_ = 0;
+  int sv_[2]                        = {-1, -1};
   wl_display *display_              = nullptr;
   wl_registry *registry_            = nullptr;
   wl_compositor *compositor_        = nullptr;
