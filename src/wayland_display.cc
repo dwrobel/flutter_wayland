@@ -505,6 +505,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
         printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
         WaylandDisplay *const wd = get_wayland_display(data);
         wd->baton_               = baton;
+        // wd->sendNotifyData();
       },
       .compute_platform_resolved_locale_callback = [](const FlutterLocale **supported_locales, size_t number_of_locales) -> const FlutterLocale * {
         printf("compute_platform_resolved_locale_callback: number_of_locales: %zu\n", number_of_locales);
@@ -637,9 +638,6 @@ bool WaylandDisplay::sendBaton(const uint64_t tnow, const char *prefix) {
   baton_         = 0;
 
   if (baton != 0) {
-    if (last_frame_ == 0) {
-    } else {
-    }
     const double vblank_time_ns   = 1e12 / refresh_;
     const auto t0                 = FlutterEngineGetCurrentTime();
     const uint64_t current_ns     = t0;
@@ -666,8 +664,30 @@ const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](v
   struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
   wl_callback_add_listener(next_cb, &kFrameListener, data);
   printf("[%ju]:    frame.done data: %u\n", static_cast<uintmax_t>(t0), callback_data);
-  const auto sent = wd->sendBaton(t0, "    ");
+  wd->sendNotifyData();
+  // const auto sent = wd->sendBaton(t0, "    ");
 }};
+
+void WaylandDisplay::readNotifyData() {
+  char c;
+  ssize_t bytes = read(sv_[1], &c, sizeof c);
+
+  if (bytes != 1) {
+    printf("Read error from vsync socket (errno: %d)\n", errno);
+    exit(1);
+  }
+}
+
+void WaylandDisplay::sendNotifyData() {
+  static unsigned char c = 0;
+  c++;
+  ssize_t bytes = write(sv_[0], &c, sizeof c);
+
+  if (bytes != 1) {
+    printf("Write error to vsync socket (errno: %d)\n", errno);
+    exit(1);
+  }
+}
 
 bool WaylandDisplay::Run() {
   if (!valid_) {
@@ -692,12 +712,12 @@ bool WaylandDisplay::Run() {
 
     int rv;
 
-    do {
-      struct pollfd fds[2] = {
-          {.fd = fd, .events = POLLIN},
-          {.fd = sv_[1], .events = POLLIN},
-      };
+    struct pollfd fds[2] = {
+        {.fd = sv_[1], .events = POLLIN},
+        {.fd = fd, .events = POLLIN | POLLERR},
+    };
 
+    do {
       const struct timespec ts = {
           .tv_sec  = 0,
           .tv_nsec = static_cast<decltype(ts.tv_nsec)>(vblank_time_ns),
@@ -706,11 +726,16 @@ bool WaylandDisplay::Run() {
       rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
     } while (rv == -1 && rv == EINTR);
 
-    if (rv <= 0) {
-      wl_display_cancel_read(display_);
-    } else {
-      wl_display_read_events(display_);
+    if (fds[0].revents & POLLIN) {
+      readNotifyData();
     }
+
+    if (fds[1].revents & POLLIN) {
+      wl_display_read_events(display_);
+    } else {
+      wl_display_cancel_read(display_);
+    }
+
     const auto t1 = FlutterEngineGetCurrentTime();
     sendBaton(t1);
     printf("[%ju]: dt: %.3f\n", t1, (t1 - t0) / 1000000.0);
