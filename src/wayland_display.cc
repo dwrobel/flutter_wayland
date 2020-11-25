@@ -433,7 +433,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
     WaylandDisplay *const wd = get_wayland_display(data);
     static auto t0           = FlutterEngineGetCurrentTime();
     const auto t1            = FlutterEngineGetCurrentTime();
-    printf("[%ju]: eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1e9);
+    printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1e9);
     t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
@@ -493,7 +493,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .command_line_argc = static_cast<int>(command_line_args_c.size()),
       .command_line_argv = command_line_args_c.data(),
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
-        printf("[%ju]: vsync: data: %p, baton: %p\n", FlutterEngineGetCurrentTime(), data, reinterpret_cast<void *>(baton));
+        printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
         WaylandDisplay *const wd = get_wayland_display(data);
         wd->baton_               = baton;
       },
@@ -623,6 +623,43 @@ bool WaylandDisplay::IsValid() const {
   return valid_;
 }
 
+bool WaylandDisplay::sendBaton(const uint64_t tnow, const char *prefix) {
+  intptr_t baton = baton_;
+  baton_         = 0;
+
+  if (baton != 0) {
+    if (last_frame_ == 0) {
+    } else {
+    }
+    const double vblank_time_ns   = 1e12 / refresh_;
+    const auto t0                 = FlutterEngineGetCurrentTime();
+    const uint64_t current_ns     = t0;
+    const uint64_t finish_time_ns = current_ns + vblank_time_ns;
+
+    printf("[%ju]: %svsync.notify(baton: %p)\n", t0, prefix, reinterpret_cast<void *>(baton));
+    const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
+
+    if (status != kSuccess) {
+      printf("[%ju]: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
+      exit(1);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
+  const auto t0            = FlutterEngineGetCurrentTime();
+  WaylandDisplay *const wd = get_wayland_display(data);
+  wd->last_frame_          = t0;
+  wl_callback_destroy(cb);
+  struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
+  wl_callback_add_listener(next_cb, &kFrameListener, data);
+  printf("[%ju]:    frame.done data: %u\n", static_cast<uintmax_t>(t0), callback_data);
+  const auto sent = wd->sendBaton(t0, "    ");
+}};
+
 bool WaylandDisplay::Run() {
   if (!valid_) {
     FLWAY_ERROR << "Could not run an invalid display." << std::endl;
@@ -631,7 +668,11 @@ bool WaylandDisplay::Run() {
 
   const int fd = wl_display_get_fd(display_);
 
+  struct wl_callback *cb = wl_surface_frame(surface_);
+  wl_callback_add_listener(cb, &kFrameListener, this);
+
   while (valid_) {
+    const auto t0               = FlutterEngineGetCurrentTime();
     const double vblank_time_ns = 1e12 / refresh_;
 
     while (wl_display_prepare_read(display_) < 0) {
@@ -653,29 +694,9 @@ bool WaylandDisplay::Run() {
     } else {
       wl_display_read_events(display_);
     }
-
-    wl_display_dispatch_pending(display_);
-
-    if (wl_display_get_error(display_) == 0) {
-      wl_display_roundtrip(display_);
-    }
-
-    intptr_t baton = baton_;
-    baton_         = 0;
-
-    if (baton != 0) {
-      const auto t0                 = FlutterEngineGetCurrentTime();
-      const uint64_t current_ns     = t0;
-      const uint64_t finish_time_ns = current_ns + vblank_time_ns;
-
-      printf("[%ju]: baton: %p\n", t0, reinterpret_cast<void *>(baton));
-      const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
-
-      if (status != kSuccess) {
-        printf("[%ju]: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
-        exit(1);
-      }
-    }
+    const auto t1 = FlutterEngineGetCurrentTime();
+    sendBaton(t1);
+    printf("[%ju]: dt: %.3f\n", t1, (t1 - t0) / 1000000.0);
   }
 
   return true;

@@ -49,26 +49,29 @@ private:
   struct xkb_context *xkb_context         = nullptr;
   GdkModifierType key_modifiers           = static_cast<GdkModifierType>(0);
 
+  static const struct wl_callback_listener kFrameListener;
+
   bool valid_ = false;
   int screen_width_;
   int screen_height_;
-  int physical_width_              = 0;
-  int physical_height_             = 0;
-  int32_t refresh_                 = 50000;
-  bool window_metrix_skipped_      = false;
-  std::atomic<intptr_t> baton_     = 0;
-  wl_display *display_             = nullptr;
-  wl_registry *registry_           = nullptr;
-  wl_compositor *compositor_       = nullptr;
-  wl_shell *shell_                 = nullptr;
-  wl_seat *seat_                   = nullptr;
-  wl_output *output_               = nullptr;
-  wl_shell_surface *shell_surface_ = nullptr;
-  wl_surface *surface_             = nullptr;
-  wl_egl_window *window_           = nullptr;
-  EGLDisplay egl_display_          = EGL_NO_DISPLAY;
-  EGLSurface egl_surface_          = nullptr;
-  EGLContext egl_context_          = EGL_NO_CONTEXT;
+  int physical_width_               = 0;
+  int physical_height_              = 0;
+  int32_t refresh_                  = 50000;
+  bool window_metrix_skipped_       = false;
+  std::atomic<intptr_t> baton_      = 0;
+  std::atomic<uint64_t> last_frame_ = 0;
+  wl_display *display_              = nullptr;
+  wl_registry *registry_            = nullptr;
+  wl_compositor *compositor_        = nullptr;
+  wl_shell *shell_                  = nullptr;
+  wl_seat *seat_                    = nullptr;
+  wl_output *output_                = nullptr;
+  wl_shell_surface *shell_surface_  = nullptr;
+  wl_surface *surface_              = nullptr;
+  wl_egl_window *window_            = nullptr;
+  EGLDisplay egl_display_           = EGL_NO_DISPLAY;
+  EGLSurface egl_surface_           = nullptr;
+  EGLContext egl_context_           = EGL_NO_CONTEXT;
 
   EGLSurface resource_egl_surface_ = nullptr;
   EGLContext resource_egl_context_ = EGL_NO_CONTEXT;
@@ -81,6 +84,7 @@ private:
 
   bool StopRunning();
 
+  bool sendBaton(const uint64_t tnow, const char *prefix = "");
   FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay);
 };
 
