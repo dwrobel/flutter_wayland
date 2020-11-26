@@ -443,7 +443,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
     WaylandDisplay *const wd = get_wayland_display(data);
     static auto t0           = FlutterEngineGetCurrentTime();
     const auto t1            = FlutterEngineGetCurrentTime();
-    // printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, frame.d);
+    printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
     t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
@@ -503,11 +503,12 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .command_line_argc = static_cast<int>(command_line_args_c.size()),
       .command_line_argv = command_line_args_c.data(),
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
-        printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
         WaylandDisplay *const wd = get_wayland_display(data);
 
+        printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
+
         if (wd->baton_ != 0) {
-          printf("ERROR: New baton arrived, but old was not sent.\n");
+          printf("ERROR: vsync.wait: New baton arrived, but old was not sent.\n");
           exit(1);
         }
 
@@ -654,7 +655,7 @@ int WaylandDisplay::sendBaton() {
     const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
     if (status != kSuccess) {
-      printf("[%ju]: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
+      printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
       exit(1);
     }
     return 0;
@@ -671,10 +672,11 @@ const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](v
   struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
   wl_callback_add_listener(next_cb, &kFrameListener, data);
 
-  printf("[%ju]:    frame.done data: %.3f\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9);
+  printf("[%ju]: vsync: frame.done data: %.3f\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9);
+
   wd->last_frame_ = last_frame_time_ns;
   if (wd->sendBaton()) {
-    printf("frame.done - baton not sent\n");
+    printf("vsync: frame.done - baton not sent\n");
   }
 }};
 
@@ -766,7 +768,6 @@ bool WaylandDisplay::Run() {
       break;
     } while (true);
 
-    // wl_display_dispatch_pending(display_);
     const auto t1 = FlutterEngineGetCurrentTime();
     printf("[%ju]: dt: %.3f\n", t1, (t1 - t0) / 1000000.0);
   }
