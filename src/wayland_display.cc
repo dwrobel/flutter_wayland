@@ -720,37 +720,42 @@ bool WaylandDisplay::Run() {
 
     wl_display_flush(display_);
 
-    int rv;
-
-    struct pollfd fds[2] = {
-        {.fd = sv_[1], .events = POLLIN},
-        {.fd = fd, .events = POLLIN | POLLERR},
-    };
-
     do {
-      const struct timespec ts = {
-          .tv_sec  = LONG_MAX,
-          .tv_nsec = static_cast<decltype(ts.tv_nsec)>(vblank_time_ns),
+      int rv;
+
+      struct pollfd fds[2] = {
+          {.fd = sv_[1], .events = POLLIN},
+          {.fd = fd, .events = POLLIN | POLLERR},
       };
 
-      rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
-    } while (rv == -1 && rv == EINTR);
+      do {
+        const struct timespec ts = {
+            .tv_sec  = LONG_MAX,
+            .tv_nsec = static_cast<decltype(ts.tv_nsec)>(vblank_time_ns),
+        };
 
-    if (rv == -1) {
-      printf("ERROR: ppoll returned -1 (errno: %d)\n", errno);
-      exit(1);
-    }
+        rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
+      } while (rv == -1 && rv == EINTR);
 
-    if (fds[0].revents & POLLIN) {
-      readNotifyData();
-      sendBaton(0);
-    }
+      if (rv == -1) {
+        printf("ERROR: ppoll returned -1 (errno: %d)\n", errno);
+        exit(1);
+      }
 
-    if (fds[1].revents & POLLIN) {
-      wl_display_read_events(display_);
-    } else {
-      wl_display_cancel_read(display_);
-    }
+      if (fds[0].revents & POLLIN) {
+        readNotifyData();
+        sendBaton(0);
+        continue;
+      }
+
+      if (fds[1].revents & POLLIN) {
+        wl_display_read_events(display_);
+      } else {
+        wl_display_cancel_read(display_);
+      }
+
+      break;
+    } while (true);
 
     wl_display_dispatch_pending(display_);
     const auto t1 = FlutterEngineGetCurrentTime();
