@@ -634,7 +634,7 @@ bool WaylandDisplay::IsValid() const {
   return valid_;
 }
 
-bool WaylandDisplay::sendBaton(const uint64_t tnow, const char *prefix) {
+bool WaylandDisplay::sendBaton() {
   intptr_t baton = baton_;
   baton_         = 0;
 
@@ -744,7 +744,7 @@ bool WaylandDisplay::Run() {
 
       if (fds[0].revents & POLLIN) {
         readNotifyData();
-        sendBaton(0);
+        sendBaton();
         continue;
       }
 

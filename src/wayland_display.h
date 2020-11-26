@@ -84,7 +84,7 @@ private:
 
   bool StopRunning();
 
-  bool sendBaton(const uint64_t tnow, const char *prefix = "");
+  bool sendBaton();
 
   int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
   void sendNotifyData();
