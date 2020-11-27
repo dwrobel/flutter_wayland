@@ -442,13 +442,15 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
     WaylandDisplay *const wd = get_wayland_display(data);
     static auto t0           = FlutterEngineGetCurrentTime();
     const auto t1            = FlutterEngineGetCurrentTime();
-    printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
+    printf("[%ju]: +eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
     t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
       FLWAY_ERROR << "Could not swap the EGL buffer." << std::endl;
       return false;
     }
+    const auto t2 = FlutterEngineGetCurrentTime();
+    printf("[%ju]: -eglSwapBuffers() %.3f\n", t2, (t2 - t1) / 1000000.);
 
     return true;
   };
@@ -664,8 +666,7 @@ struct timespec WaylandDisplay::vSyncHandler() {
     const auto finish_time_ns = current_ns + vblank_time_ns;
 
     const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns;
-
-    printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju)\n", t_now_ns, reinterpret_cast<void *>(baton), finish_time_ns, skipped_frames);
+    printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju, lf: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load());
     const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
     if (status != kSuccess) {
@@ -679,6 +680,8 @@ struct timespec WaylandDisplay::vSyncHandler() {
     };
   }
 
+  printf("[%ju]: vsync.ntfy sleep (baton: %p, vs: %ju, lf: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton_.load()), time_to_next_vsync_ns, last_frame_.load());
+
   return timespec{
       .tv_sec  = static_cast<decltype(::timespec::tv_sec)>(time_to_next_vsync_ns / 1000000000),
       .tv_nsec = static_cast<decltype(::timespec::tv_nsec)>(time_to_next_vsync_ns % 1000000000),
@@ -686,14 +689,16 @@ struct timespec WaylandDisplay::vSyncHandler() {
 }
 
 const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
-  const auto last_frame_time_ns = FlutterEngineGetCurrentTime();
-  WaylandDisplay *const wd      = get_wayland_display(data);
+  static uint32_t last_callback_data = 0;
+  const auto last_frame_time_ns      = FlutterEngineGetCurrentTime();
+  WaylandDisplay *const wd           = get_wayland_display(data);
 
   wl_callback_destroy(cb);
   struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
   wl_callback_add_listener(next_cb, &kFrameListener, data);
 
-  printf("[%ju]: vsync: frame.done data: %.3f\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9);
+  printf("[%ju]: vsync: frame.done data: %.3f t: %u cdt: %u [ms]\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9, callback_data, callback_data - last_callback_data);
+  last_callback_data = callback_data;
 
   wd->last_frame_ = last_frame_time_ns;
 }};
@@ -736,8 +741,7 @@ bool WaylandDisplay::Run() {
 
   const int fd = wl_display_get_fd(display_);
 
-  struct wl_callback *cb = wl_surface_frame(surface_);
-  wl_callback_add_listener(cb, &kFrameListener, this);
+  wl_callback_add_listener(wl_surface_frame(surface_), &kFrameListener, this);
 
   while (valid_) {
     const auto t0               = FlutterEngineGetCurrentTime();
