@@ -9,7 +9,6 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 
 #include <chrono>
 #include <sstream>
@@ -443,7 +442,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
     WaylandDisplay *const wd = get_wayland_display(data);
     static auto t0           = FlutterEngineGetCurrentTime();
     const auto t1            = FlutterEngineGetCurrentTime();
-    // printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
+    printf("[%ju]:   eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
     t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
@@ -505,7 +504,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
         WaylandDisplay *const wd = get_wayland_display(data);
 
-        // printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
+        printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
 
         if (wd->baton_ != 0) {
           printf("ERROR: vsync.wait: New baton arrived, but old was not sent.\n");
@@ -641,27 +640,49 @@ bool WaylandDisplay::IsValid() const {
   return valid_;
 }
 
-int WaylandDisplay::sendBaton() {
-  intptr_t baton = baton_;
-  baton_         = 0;
+struct timespec WaylandDisplay::vSyncHandler() {
+  if (baton_ == 0) {
+    return timespec{
+        .tv_sec  = LONG_MAX,
+        .tv_nsec = 0,
+    };
+  }
 
-  if (baton != 0) {
-    const double vblank_time_ns   = 1e12 / refresh_;
-    const auto t0                 = FlutterEngineGetCurrentTime();
-    const uint64_t skipped_frames = (t0 - last_frame_) / vblank_time_ns;
-    const uint64_t current_ns     = last_frame_ + ((skipped_frames + 0) * vblank_time_ns);
-    const uint64_t finish_time_ns = current_ns + vblank_time_ns;
-    // printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju)\n", t0, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames);
+  const auto t_now_ns                  = FlutterEngineGetCurrentTime();
+  const auto vblank_time_ns            = 1000000000000 / (1 /* Hz */ * 1000); // refresh_;
+  const uint64_t time_to_next_vsync_ns = vblank_time_ns - ((t_now_ns - last_frame_) % vblank_time_ns);
+
+  if (t_vsync_next_ns_ == 0) {
+    t_vsync_next_ns_ = t_now_ns + time_to_next_vsync_ns;
+  }
+
+  if (t_now_ns >= t_vsync_next_ns_) {
+    t_vsync_next_ns_          = 0;
+    intptr_t baton            = baton_;
+    baton_                    = 0;
+    const auto current_ns     = t_now_ns + time_to_next_vsync_ns;
+    const auto finish_time_ns = current_ns + vblank_time_ns;
+
+    const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns;
+
+    printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju)\n", t_now_ns, reinterpret_cast<void *>(baton), finish_time_ns, skipped_frames);
     const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
     if (status != kSuccess) {
-      printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t0, status, reinterpret_cast<void *>(baton));
+      printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t_now_ns, status, reinterpret_cast<void *>(baton));
       exit(1);
     }
-    return 0;
+
+    return timespec{
+        .tv_sec  = LONG_MAX,
+        .tv_nsec = 0,
+    };
   }
 
-  return 1;
+  return timespec{
+      .tv_sec  = static_cast<decltype(::timespec::tv_sec)>(time_to_next_vsync_ns / 1000000000),
+      .tv_nsec = static_cast<decltype(::timespec::tv_nsec)>(time_to_next_vsync_ns % 1000000000),
+  };
 }
 
 const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
@@ -672,12 +693,9 @@ const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](v
   struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
   wl_callback_add_listener(next_cb, &kFrameListener, data);
 
-  // printf("[%ju]: vsync: frame.done data: %.3f\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9);
+  printf("[%ju]: vsync: frame.done data: %.3f\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9);
 
   wd->last_frame_ = last_frame_time_ns;
-  if (wd->sendBaton()) {
-    // printf("vsync: frame.done - baton not sent\n");
-  }
 }};
 
 void WaylandDisplay::readNotifyData() {
@@ -740,10 +758,7 @@ bool WaylandDisplay::Run() {
       };
 
       do {
-        const struct timespec ts = {
-            .tv_sec  = LONG_MAX,
-            .tv_nsec = static_cast<decltype(ts.tv_nsec)>(vblank_time_ns),
-        };
+        struct timespec ts = vSyncHandler();
 
         rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
       } while (rv == -1 && rv == EINTR);
@@ -753,9 +768,10 @@ bool WaylandDisplay::Run() {
         exit(1);
       }
 
+      vSyncHandler();
+
       if (fds[0].revents & POLLIN) {
         readNotifyData();
-        sendBaton();
         continue;
       }
 

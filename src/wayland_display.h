@@ -15,6 +15,7 @@
 
 #include <memory>
 #include <string>
+#include <sys/time.h>
 #include <sys/types.h>
 
 #include "macros.h"
@@ -84,11 +85,13 @@ private:
 
   bool StopRunning();
 
-  int sendBaton();
-
+  // vsync related {
+  uint64_t t_vsync_next_ns_ = 0;
+  struct timespec vSyncHandler();
   int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
   void sendNotifyData();
   void readNotifyData();
+  // }
 
   FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay);
 };
