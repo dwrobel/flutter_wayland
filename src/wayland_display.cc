@@ -342,9 +342,9 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
         [](void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          wd->refresh_ = refresh;
+          wd->vblank_time_ns_ = 1000000000000 / refresh;
 
-          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, wl_output, flags, wd->screen_width_, width, wd->screen_height_, height, wd->refresh_);
+          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, wl_output, flags, wd->screen_width_, width, wd->screen_height_, height, refresh);
 
           if (wd->engine_) {
             FlutterWindowMetricsEvent event = {};
@@ -377,7 +377,7 @@ WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &b
     return;
   }
 
-  if (socketpair(AF_LOCAL, SOCK_DGRAM, 0, &sv_[0]) == -1) {
+  if (socketpair(AF_LOCAL, SOCK_DGRAM | SOCK_CLOEXEC, 0, &sv_[0]) == -1) {
     FLWAY_ERROR << "socketpair() failed, errno: " << errno << std::endl;
     return;
   }
@@ -450,7 +450,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       FLWAY_ERROR << "Could not swap the EGL buffer." << std::endl;
       return false;
     }
-    const auto t2 = FlutterEngineGetCurrentTime();
+    // const auto t2 = FlutterEngineGetCurrentTime();
     // printf("[%ju]: -eglSwapBuffers() %.3f\n", t2, (t2 - t1) / 1000000.);
 
     return true;
@@ -507,7 +507,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
         WaylandDisplay *const wd = get_wayland_display(data);
 
-        printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
+        // printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
 
         if (wd->baton_ != 0) {
           printf("ERROR: vsync.wait: New baton arrived, but old was not sent.\n");
@@ -515,7 +515,10 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
         }
 
         wd->baton_ = baton;
-        wd->sendNotifyData();
+
+        if (wd->sendNotifyData() != 1) {
+          exit(1);
+        }
       },
       .compute_platform_resolved_locale_callback = [](const FlutterLocale **supported_locales, size_t number_of_locales) -> const FlutterLocale * {
         printf("compute_platform_resolved_locale_callback: number_of_locales: %zu\n", number_of_locales);
@@ -643,52 +646,41 @@ bool WaylandDisplay::IsValid() const {
   return valid_;
 }
 
-int WaylandDisplay::vSyncHandler() {
+ssize_t WaylandDisplay::vSyncHandler() {
   if (baton_ == 0) {
-    return 1;
+    return 0;
   }
 
-  const auto t_now_ns                  = FlutterEngineGetCurrentTime();
-  const auto vblank_time_ns            = 1000000000000 / refresh_; // 1000000000000 / (1 /* Hz */ * 1000); // refresh_;
-  const auto after_vsync_time_ns       = (t_now_ns - last_frame_) % vblank_time_ns;
-  const auto before_next_vsync_time_ns = vblank_time_ns - after_vsync_time_ns;
-  const uint64_t time_next_vsync_ns    = t_now_ns + before_next_vsync_time_ns;
-  auto vsync_dt_ns                     = time_next_vsync_ns - t_vsync_next_ns_;
+  const auto t_now_ns                      = FlutterEngineGetCurrentTime();
+  const uint64_t after_vsync_time_ns       = (t_now_ns - last_frame_) % vblank_time_ns_;
+  const uint64_t before_next_vsync_time_ns = vblank_time_ns_ - after_vsync_time_ns;
+  const uint64_t current_ns                = t_now_ns + before_next_vsync_time_ns;
+  const uint64_t finish_time_ns            = current_ns + vblank_time_ns_;
+  intptr_t baton                           = std::atomic_exchange(&baton_, 0);
 
-  t_vsync_next_ns_          = time_next_vsync_ns;
-  intptr_t baton            = baton_;
-  baton_                    = 0;
-  const auto current_ns     = time_next_vsync_ns;
-  const auto finish_time_ns = current_ns + vblank_time_ns;
-
-  const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns;
-  printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju, lf: %ju dt: %ju, aft: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load(), vsync_dt_ns, after_vsync_time_ns);
+  const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns_;
+  // printf("[%ju]: vsync.ntfy baton: %p  c: %ju  f: %ju +%ju  lf: %ju aft: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load(), after_vsync_time_ns);
   const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
   if (status != kSuccess) {
-    printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t_now_ns, status, reinterpret_cast<void *>(baton));
-    exit(1);
+    printf("[%ju]: ERROR: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t_now_ns, status, reinterpret_cast<void *>(baton));
+    return -1;
   }
 
-  return 0;
+  return 1;
 }
 
 const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
-  static uint32_t last_callback_data = 0;
-  const auto last_frame_time_ns      = FlutterEngineGetCurrentTime();
-  WaylandDisplay *const wd           = get_wayland_display(data);
+  WaylandDisplay *const wd = get_wayland_display(data);
+  wd->last_frame_          = FlutterEngineGetCurrentTime();
 
   wl_callback_destroy(cb);
-  struct wl_callback *next_cb = wl_surface_frame(wd->surface_);
-  wl_callback_add_listener(next_cb, &kFrameListener, data);
+  wl_callback_add_listener(wl_surface_frame(wd->surface_), &kFrameListener, data);
 
-  printf("[%ju]: vsync: frame.done data: %.3f t: %u cdt: %u [ms]\n", static_cast<uintmax_t>(last_frame_time_ns), (last_frame_time_ns - wd->last_frame_) / 1e9, callback_data, callback_data - last_callback_data);
-  last_callback_data = callback_data;
-
-  wd->last_frame_ = last_frame_time_ns;
+  // printf("[%ju]: vsync: frame.done data: cdt: %u [ms]\n", static_cast<uintmax_t>(wd->last_frame_), callback_data);
 }};
 
-void WaylandDisplay::readNotifyData() {
+ssize_t WaylandDisplay::readNotifyData() {
   ssize_t rv;
 
   do {
@@ -697,12 +689,13 @@ void WaylandDisplay::readNotifyData() {
   } while (rv == -1 && errno == EINTR);
 
   if (rv != 1) {
-    printf("Read error from vsync socket (rv: %zd, errno: %d)\n", rv, errno);
-    exit(1);
+    printf("ERROR: Read error from vsync socket (rv: %zd, errno: %d)\n", rv, errno);
   }
+
+  return rv;
 }
 
-void WaylandDisplay::sendNotifyData() {
+ssize_t WaylandDisplay::sendNotifyData() {
   static unsigned char c = 0;
   ssize_t rv;
 
@@ -711,11 +704,11 @@ void WaylandDisplay::sendNotifyData() {
   do {
     rv = write(sv_[0], &c, sizeof c);
   } while (rv == -1 && errno == EINTR);
-
   if (rv != 1) {
-    printf("Write error to vsync socket (rv: %zd, errno: %d)\n", rv, errno);
-    exit(1);
+    printf("ERROR: Write error to vsync socket (rv: %zd, errno: %d)\n", rv, errno);
   }
+
+  return rv;
 }
 
 bool WaylandDisplay::Run() {
@@ -729,9 +722,6 @@ bool WaylandDisplay::Run() {
   wl_callback_add_listener(wl_surface_frame(surface_), &kFrameListener, this);
 
   while (valid_) {
-    const auto t0               = FlutterEngineGetCurrentTime();
-    const double vblank_time_ns = 1e12 / refresh_;
-
     while (wl_display_prepare_read(display_) != 0) {
       wl_display_dispatch_pending(display_);
     }
@@ -757,13 +747,22 @@ bool WaylandDisplay::Run() {
 
       if (rv == -1) {
         printf("ERROR: ppoll returned -1 (errno: %d)\n", errno);
-        exit(1);
+        return false;
       }
 
-      vSyncHandler();
-
       if (fds[0].revents & POLLIN) {
-        readNotifyData();
+        auto rv = vSyncHandler();
+
+        if (rv != 1) {
+          return false;
+        }
+
+        rv = readNotifyData();
+
+        if (rv != 1) {
+          return false;
+        }
+
         continue;
       }
 
@@ -775,9 +774,6 @@ bool WaylandDisplay::Run() {
 
       break;
     } while (true);
-
-    const auto t1 = FlutterEngineGetCurrentTime();
-    // printf("[%ju]: dt: %.3f\n", t1, (t1 - t0) / 1000000.0);
   }
 
   return true;

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <unistd.h>
 #include <EGL/egl.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
@@ -56,7 +57,6 @@ private:
   int screen_height_;
   int physical_width_               = 0;
   int physical_height_              = 0;
-  int32_t refresh_                  = 50000;
   bool window_metrix_skipped_       = false;
   std::atomic<intptr_t> baton_      = 0;
   std::atomic<uint64_t> last_frame_ = 0;
@@ -85,11 +85,11 @@ private:
   bool StopRunning();
 
   // vsync related {
-  uint64_t t_vsync_next_ns_ = 0;
-  int vSyncHandler();
+  uint64_t vblank_time_ns_ = 1000000000000 / 60000;
+  ssize_t vSyncHandler();
   int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
-  void sendNotifyData();
-  void readNotifyData();
+  ssize_t sendNotifyData();
+  ssize_t readNotifyData();
   // }
 
   FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay);
