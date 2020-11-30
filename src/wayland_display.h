@@ -93,7 +93,7 @@ private:
   ssize_t readNotifyData();
   // }
 
-  FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay);
+  FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay)
 };
 
 } // namespace flutter

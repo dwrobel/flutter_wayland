@@ -61,7 +61,7 @@ const wl_registry_listener WaylandDisplay::kRegistryListener = {
     .global = [](void *data, struct wl_registry *wl_registry, uint32_t name, const char *interface, uint32_t version) -> void {
       WaylandDisplay *const wd = get_wayland_display(data);
 
-      printf("AnnounceRegistryInterface(registry:%p, name:%2u, interface:%s, version:%u)\n", wl_registry, name, interface, version);
+      printf("AnnounceRegistryInterface(registry:%p, name:%2u, interface:%s, version:%u)\n", static_cast<void *>(wl_registry), name, interface, version);
 
       if (strcmp(interface, "wl_compositor") == 0) {
         wd->compositor_ = static_cast<decltype(compositor_)>(wl_registry_bind(wl_registry, name, &wl_compositor_interface, 1));
@@ -302,7 +302,7 @@ const wl_seat_listener WaylandDisplay::kSeatListener = {
           WaylandDisplay *const wd = get_wayland_display(data);
           assert(seat == wd->seat_);
 
-          printf("seat.capabilities(data:%p, seat:%p, capabilities:0x%x)\n", data, seat, capabilities);
+          printf("seat.capabilities(data:%p, seat:%p, capabilities:0x%x)\n", data, static_cast<void *>(seat), capabilities);
 
           if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
             printf("seat.capabilities: pointer\n");
@@ -335,8 +335,8 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
           wd->physical_width_  = physical_width;
           wd->physical_height_ = physical_height;
 
-          printf("output.geometry(data:%p, wl_output:%p, x:%d, y:%d, physical_width:%d, physical_height:%d, subpixel:%d, make:%s, model:%s, transform:%d)\n", data, wl_output, x, y, physical_width, physical_height, subpixel, make, model,
-                 transform);
+          printf("output.geometry(data:%p, wl_output:%p, x:%d, y:%d, physical_width:%d, physical_height:%d, subpixel:%d, make:%s, model:%s, transform:%d)\n", data, static_cast<void *>(wl_output), x, y, physical_width, physical_height,
+                 subpixel, make, model, transform);
         },
     .mode =
         [](void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
@@ -344,7 +344,7 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
 
           wd->vblank_time_ns_ = 1000000000000 / refresh;
 
-          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, wl_output, flags, wd->screen_width_, width, wd->screen_height_, height, refresh);
+          printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, static_cast<void *>(wl_output), flags, wd->screen_width_, width, wd->screen_height_, height, refresh);
 
           if (wd->engine_) {
             FlutterWindowMetricsEvent event = {};
@@ -364,8 +364,8 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
                       << "skipped" << std::endl;
           }
         },
-    .done  = [](void *data, struct wl_output *wl_output) { printf("output.done(data:%p, wl_output:%p)\n", data, wl_output); },
-    .scale = [](void *data, struct wl_output *wl_output, int32_t factor) { printf("output.scale(data:%p, wl_output:%p, factor:%d)\n", data, wl_output, factor); },
+    .done  = [](void *data, struct wl_output *wl_output) { printf("output.done(data:%p, wl_output:%p)\n", data, static_cast<void *>(wl_output)); },
+    .scale = [](void *data, struct wl_output *wl_output, int32_t factor) { printf("output.scale(data:%p, wl_output:%p, factor:%d)\n", data, static_cast<void *>(wl_output), factor); },
 };
 
 WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &bundle_path, const std::vector<std::string> &command_line_args)
@@ -658,7 +658,7 @@ ssize_t WaylandDisplay::vSyncHandler() {
   const uint64_t finish_time_ns            = current_ns + vblank_time_ns_;
   intptr_t baton                           = std::atomic_exchange(&baton_, 0);
 
-  const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns_;
+  // const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns_;
   // printf("[%ju]: vsync.ntfy baton: %p  c: %ju  f: %ju +%ju  lf: %ju aft: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load(), after_vsync_time_ns);
   const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
