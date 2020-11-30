@@ -1,4 +1,3 @@
-// Copyright 2018 The Flutter Authors. All rights reserved.
 // Copyright 2019 Damian Wrobel <dwrobel@ertelnet.rybnik.pl>
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
@@ -87,7 +86,7 @@ private:
 
   // vsync related {
   uint64_t t_vsync_next_ns_ = 0;
-  struct timespec vSyncHandler();
+  int vSyncHandler();
   int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
   void sendNotifyData();
   void readNotifyData();

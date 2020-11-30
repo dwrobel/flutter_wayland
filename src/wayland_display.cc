@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include <chrono>
 #include <sstream>
@@ -442,7 +443,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
     WaylandDisplay *const wd = get_wayland_display(data);
     static auto t0           = FlutterEngineGetCurrentTime();
     const auto t1            = FlutterEngineGetCurrentTime();
-    printf("[%ju]: +eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
+    // printf("[%ju]: +eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
     t0 = t1;
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
@@ -450,7 +451,7 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       return false;
     }
     const auto t2 = FlutterEngineGetCurrentTime();
-    printf("[%ju]: -eglSwapBuffers() %.3f\n", t2, (t2 - t1) / 1000000.);
+    // printf("[%ju]: -eglSwapBuffers() %.3f\n", t2, (t2 - t1) / 1000000.);
 
     return true;
   };
@@ -642,50 +643,34 @@ bool WaylandDisplay::IsValid() const {
   return valid_;
 }
 
-struct timespec WaylandDisplay::vSyncHandler() {
+int WaylandDisplay::vSyncHandler() {
   if (baton_ == 0) {
-    return timespec{
-        .tv_sec  = LONG_MAX,
-        .tv_nsec = 0,
-    };
+    return 1;
   }
 
   const auto t_now_ns                  = FlutterEngineGetCurrentTime();
-  const auto vblank_time_ns            = 1000000000000 / (1 /* Hz */ * 1000); // refresh_;
-  const uint64_t time_to_next_vsync_ns = vblank_time_ns - ((t_now_ns - last_frame_) % vblank_time_ns);
+  const auto vblank_time_ns            = 1000000000000 / refresh_; // 1000000000000 / (1 /* Hz */ * 1000); // refresh_;
+  const auto after_vsync_time_ns       = (t_now_ns - last_frame_) % vblank_time_ns;
+  const auto before_next_vsync_time_ns = vblank_time_ns - after_vsync_time_ns;
+  const uint64_t time_next_vsync_ns    = t_now_ns + before_next_vsync_time_ns;
+  auto vsync_dt_ns                     = time_next_vsync_ns - t_vsync_next_ns_;
 
-  if (t_vsync_next_ns_ == 0) {
-    t_vsync_next_ns_ = t_now_ns + time_to_next_vsync_ns;
+  t_vsync_next_ns_          = time_next_vsync_ns;
+  intptr_t baton            = baton_;
+  baton_                    = 0;
+  const auto current_ns     = time_next_vsync_ns;
+  const auto finish_time_ns = current_ns + vblank_time_ns;
+
+  const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns;
+  printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju, lf: %ju dt: %ju, aft: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load(), vsync_dt_ns, after_vsync_time_ns);
+  const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
+
+  if (status != kSuccess) {
+    printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t_now_ns, status, reinterpret_cast<void *>(baton));
+    exit(1);
   }
 
-  if (t_now_ns >= t_vsync_next_ns_) {
-    t_vsync_next_ns_          = 0;
-    intptr_t baton            = baton_;
-    baton_                    = 0;
-    const auto current_ns     = t_now_ns + time_to_next_vsync_ns;
-    const auto finish_time_ns = current_ns + vblank_time_ns;
-
-    const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns;
-    printf("[%ju]: vsync.ntfy(baton: %p, c: %ju, f: %ju +%ju, lf: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load());
-    const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
-
-    if (status != kSuccess) {
-      printf("[%ju]: vsync.ntfy: FlutterEngineOnVsync failed(%d): baton: %p\n", t_now_ns, status, reinterpret_cast<void *>(baton));
-      exit(1);
-    }
-
-    return timespec{
-        .tv_sec  = LONG_MAX,
-        .tv_nsec = 0,
-    };
-  }
-
-  printf("[%ju]: vsync.ntfy sleep (baton: %p, vs: %ju, lf: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton_.load()), time_to_next_vsync_ns, last_frame_.load());
-
-  return timespec{
-      .tv_sec  = static_cast<decltype(::timespec::tv_sec)>(time_to_next_vsync_ns / 1000000000),
-      .tv_nsec = static_cast<decltype(::timespec::tv_nsec)>(time_to_next_vsync_ns % 1000000000),
-  };
+  return 0;
 }
 
 const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
@@ -762,7 +747,10 @@ bool WaylandDisplay::Run() {
       };
 
       do {
-        struct timespec ts = vSyncHandler();
+        static const struct timespec ts = {
+            .tv_sec  = LONG_MAX,
+            .tv_nsec = 0,
+        };
 
         rv = ppoll(&fds[0], std::size(fds), &ts, nullptr);
       } while (rv == -1 && rv == EINTR);
