@@ -685,7 +685,7 @@ ssize_t WaylandDisplay::readNotifyData() {
 
   do {
     char c;
-    rv = read(sv_[1], &c, sizeof c);
+    rv = read(sv_[SOCKET_READER], &c, sizeof c);
   } while (rv == -1 && errno == EINTR);
 
   if (rv != 1) {
@@ -702,7 +702,7 @@ ssize_t WaylandDisplay::sendNotifyData() {
   c++;
 
   do {
-    rv = write(sv_[0], &c, sizeof c);
+    rv = write(sv_[SOCKET_WRITER], &c, sizeof c);
   } while (rv == -1 && errno == EINTR);
   if (rv != 1) {
     printf("ERROR: Write error to vsync socket (rv: %zd, errno: %d)\n", rv, errno);
