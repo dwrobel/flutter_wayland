@@ -441,17 +441,12 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
   };
   config.open_gl.present = [](void *data) -> bool {
     WaylandDisplay *const wd = get_wayland_display(data);
-    static auto t0           = FlutterEngineGetCurrentTime();
-    const auto t1            = FlutterEngineGetCurrentTime();
-    // printf("[%ju]: +eglSwapBuffers() %.3f\n", t0, (t1 - t0) / 1000000.);
-    t0 = t1;
+
     if (eglSwapBuffers(wd->egl_display_, wd->egl_surface_) != EGL_TRUE) {
       LogLastEGLError();
       FLWAY_ERROR << "Could not swap the EGL buffer." << std::endl;
       return false;
     }
-    // const auto t2 = FlutterEngineGetCurrentTime();
-    // printf("[%ju]: -eglSwapBuffers() %.3f\n", t2, (t2 - t1) / 1000000.);
 
     return true;
   };
@@ -506,8 +501,6 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .command_line_argv = command_line_args_c.data(),
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
         WaylandDisplay *const wd = get_wayland_display(data);
-
-        // printf("[%ju]: vsync.wait(baton: %p)\n", FlutterEngineGetCurrentTime(), reinterpret_cast<void *>(baton));
 
         if (wd->baton_ != 0) {
           printf("ERROR: vsync.wait: New baton arrived, but old was not sent.\n");
@@ -658,8 +651,6 @@ ssize_t WaylandDisplay::vSyncHandler() {
   const uint64_t finish_time_ns            = current_ns + vblank_time_ns_;
   intptr_t baton                           = std::atomic_exchange(&baton_, 0);
 
-  // const auto skipped_frames = (t_now_ns - last_frame_) / vblank_time_ns_;
-  // printf("[%ju]: vsync.ntfy baton: %p  c: %ju  f: %ju +%ju  lf: %ju aft: %ju)\n", t_now_ns, reinterpret_cast<void *>(baton), current_ns, finish_time_ns, skipped_frames, last_frame_.load(), after_vsync_time_ns);
   const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
   if (status != kSuccess) {
@@ -676,8 +667,6 @@ const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](v
 
   wl_callback_destroy(cb);
   wl_callback_add_listener(wl_surface_frame(wd->surface_), &kFrameListener, data);
-
-  // printf("[%ju]: vsync: frame.done data: cdt: %u [ms]\n", static_cast<uintmax_t>(wd->last_frame_), callback_data);
 }};
 
 ssize_t WaylandDisplay::readNotifyData() {
