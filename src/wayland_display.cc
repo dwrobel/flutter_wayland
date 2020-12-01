@@ -35,6 +35,8 @@
 
 namespace flutter {
 
+static_assert(_POSIX_MONOTONIC_CLOCK >= 0, "CLOCK_MONOTONIC not available");
+
 static double get_pixel_ratio(int32_t physical_width, int32_t physical_height, int32_t pixels_width, int32_t pixels_height) {
 
   if (pixels_width == 0 || physical_height == 0 || pixels_width == 0 || pixels_height == 0) {
@@ -379,12 +381,24 @@ const struct wp_presentation_feedback_listener WaylandDisplay::kPresentationFeed
     .presented =
         [](void *data, struct wp_presentation_feedback *wp_presentation_feedback, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec, uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
           WaylandDisplay *const wd = get_wayland_display(data);
-          wp_presentation_feedback_add_listener(::wp_presentation_feedback(wd->presentation_, wd->surface_), &kPresentationFeedbackListener, data);
+
+          const uint64_t new_last_frame_ns = (((static_cast<uint64_t>(tv_sec_hi) << 32) + tv_sec_lo) * 1000000000) + tv_nsec;
+
+          if (refresh != wd->vblank_time_ns_) {
+            static auto displayed = false;
+
+            if (!displayed) {
+              printf("WARN: Variable display rate output: vblank_time_ns: %ju refresh: %u\n", wd->vblank_time_ns_, refresh);
+              displayed = true;
+            }
+          }
+
+          wd->last_frame_ = new_last_frame_ns;
         },
     .discarded =
         [](void *data, struct wp_presentation_feedback *wp_presentation_feedback) {
-          WaylandDisplay *const wd = get_wayland_display(data);
-          wp_presentation_feedback_add_listener(::wp_presentation_feedback(wd->presentation_, wd->surface_), &kPresentationFeedbackListener, data);
+          // TODO: remove it
+          printf("presentation.frame dropped\n");
         },
 }; // namespace flutter
 
@@ -394,7 +408,8 @@ const struct wp_presentation_listener WaylandDisplay::kPresentationListener = {
           WaylandDisplay *const wd = get_wayland_display(data);
 
           wd->presentation_clk_id_ = clk_id;
-          wp_presentation_feedback_add_listener(::wp_presentation_feedback(wd->presentation_, wd->surface_), &kPresentationFeedbackListener, data);
+
+          printf("presentation.clk_id: %u\n", clk_id);
         },
 };
 
@@ -693,8 +708,13 @@ ssize_t WaylandDisplay::vSyncHandler() {
 
 const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](void *data, struct wl_callback *cb, uint32_t callback_data) {
   WaylandDisplay *const wd = get_wayland_display(data);
-  wd->last_frame_          = FlutterEngineGetCurrentTime();
 
+  /* check if we presentation time extension interface working */
+  if (wd->presentation_clk_id_ == CLOCK_MONOTONIC) {
+    return;
+  }
+
+  wd->last_frame_ = FlutterEngineGetCurrentTime();
   wl_callback_destroy(cb);
   wl_callback_add_listener(wl_surface_frame(wd->surface_), &kFrameListener, data);
 }};
@@ -770,13 +790,18 @@ bool WaylandDisplay::Run() {
       }
 
       if (fds[0].revents & POLLIN) {
-        auto rv = vSyncHandler();
+        auto rv = readNotifyData();
 
         if (rv != 1) {
           return false;
         }
 
-        rv = readNotifyData();
+        if (presentation_clk_id_ != CLOCK_MONOTONIC) {
+          wp_presentation_feedback_add_listener(::wp_presentation_feedback(presentation_, surface_), &kPresentationFeedbackListener, this);
+          wl_display_dispatch_pending(display_);
+        }
+
+        rv = vSyncHandler();
 
         if (rv != 1) {
           return false;
@@ -793,6 +818,8 @@ bool WaylandDisplay::Run() {
 
       break;
     } while (true);
+
+    wl_display_dispatch_pending(display_);
   }
 
   return true;
