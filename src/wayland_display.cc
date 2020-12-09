@@ -261,6 +261,21 @@ const wl_keyboard_listener WaylandDisplay::kKeyboardListener = {
           if (utf32) {
             if (utf32 >= 0x21 && utf32 <= 0x7E) {
               printf("the key %c was %s\n", (char)utf32, type == GDK_KEY_PRESS ? "pressed" : "released");
+
+              if (wd->kbd_grab_manager_) {
+                if (utf32 == '9' && type == GDK_KEY_PRESS) {
+                  if (wd->xwayland_keyboard_grab) {
+                    printf("kbd_grab_manager: destroying grab...\n");
+                    zwp_xwayland_keyboard_grab_v1_destroy(wd->xwayland_keyboard_grab);
+                    wd->xwayland_keyboard_grab = nullptr;
+                  }
+                } else if (utf32 == '7' && type == GDK_KEY_PRESS) {
+                  if (wd->xwayland_keyboard_grab == nullptr) {
+                    printf("kbd_grab_manager: grabbing keyboard...\n");
+                    wd->xwayland_keyboard_grab = zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard(wd->kbd_grab_manager_, wd->surface_, wd->seat_);
+                  }
+                }
+              }
             } else {
               printf("the key U+%04X was %s\n", utf32, type == GDK_KEY_PRESS ? "pressed" : "released");
             }
