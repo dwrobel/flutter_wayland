@@ -51,6 +51,7 @@ private:
 
   struct zwp_xwayland_keyboard_grab_v1 *xwayland_keyboard_grab = nullptr;
 
+  bool key_handler(const uint32_t key, const uint32_t state_w, const bool is_repeat = false);
   static const wl_keyboard_listener kKeyboardListener;
   wl_keyboard_keymap_format keymap_format = WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP;
   struct xkb_state *xkb_state             = nullptr;
@@ -89,6 +90,15 @@ private:
   bool SetupEngine(const std::string &bundle_path, const std::vector<std::string> &command_line_args);
 
   bool StopRunning();
+
+  // key repeat related
+  struct {
+    int32_t repeat_delay_ms_    = 400;
+    int32_t repeat_interval_ms_ = 40;
+    uint32_t last_              = 0;
+    uint32_t state_             = WL_KEYBOARD_KEY_STATE_RELEASED;
+    int timer_fd_               = -1;
+  } key;
 
   // vsync related {
   uint32_t presentation_clk_id_     = UINT32_MAX;

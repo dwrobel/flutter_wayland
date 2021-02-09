@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/timerfd.h>
 
 #include <chrono>
 #include <sstream>
@@ -74,7 +75,7 @@ const wl_registry_listener WaylandDisplay::kRegistryListener = {
       }
 
       if (strcmp(interface, "wl_seat") == 0) {
-        wd->seat_ = static_cast<decltype(seat_)>(wl_registry_bind(wl_registry, name, &wl_seat_interface, 1));
+        wd->seat_ = static_cast<decltype(seat_)>(wl_registry_bind(wl_registry, name, &wl_seat_interface, 4));
         wl_seat_add_listener(wd->seat_, &kSeatListener, wd);
         return;
       }
@@ -214,86 +215,21 @@ const wl_keyboard_listener WaylandDisplay::kKeyboardListener = {
         [](void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state_w) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          if (wd->keymap_format == WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP) {
-            printf("Hmm - no keymap, no key event\n");
-            return;
+          uint32_t repeat_rate_ms     = 0;
+          uint32_t repeat_interval_ms = 0;
+
+          if (wd->key_handler(wd->key.last_ = key, wd->key.state_ = state_w)) {
+            repeat_rate_ms     = wd->key.repeat_delay_ms_;
+            repeat_interval_ms = wd->key.repeat_interval_ms_;
           }
 
-          const xkb_keycode_t hardware_keycode = key + (wd->keymap_format * 8);
-          const xkb_keysym_t keysym            = xkb_state_key_get_one_sym(wd->xkb_state, hardware_keycode);
+          struct itimerspec ts;
+          timespec_from_msec(&ts.it_value, repeat_rate_ms);
+          timespec_from_msec(&ts.it_interval, repeat_interval_ms);
+          const int rv = timerfd_settime(wd->key.timer_fd_, 0, &ts, nullptr);
 
-          if (keysym == XKB_KEY_NoSymbol) {
-            printf("Hmm - no key symbol, no key event\n");
-            return;
-          }
-
-          xkb_mod_mask_t mods = xkb_state_serialize_mods(wd->xkb_state, XKB_STATE_MODS_EFFECTIVE);
-          wd->key_modifiers   = toGDKModifiers(wd->keymap, mods);
-
-          // Remove lock states from state mask.
-          guint state = wd->key_modifiers & ~(GDK_LOCK_MASK | GDK_MOD2_MASK);
-
-          static bool shift_lock_pressed = false;
-          static bool caps_lock_pressed  = false;
-          static bool num_lock_pressed   = false;
-
-          const GdkEventType type = state_w == WL_KEYBOARD_KEY_STATE_PRESSED ? GDK_KEY_PRESS : GDK_KEY_RELEASE;
-
-          switch (keysym) {
-          case GDK_KEY_Num_Lock:
-            num_lock_pressed = type == GDK_KEY_PRESS;
-            break;
-          case GDK_KEY_Caps_Lock:
-            caps_lock_pressed = type == GDK_KEY_PRESS;
-            break;
-          case GDK_KEY_Shift_Lock:
-            shift_lock_pressed = type == GDK_KEY_PRESS;
-            break;
-          }
-
-          // Add back in the state matching the actual pressed state of the lock keys,
-          // not the lock states.
-          state |= (shift_lock_pressed || caps_lock_pressed) ? GDK_LOCK_MASK : 0x0;
-          state |= num_lock_pressed ? GDK_MOD2_MASK : 0x0;
-
-          const uint32_t utf32 = xkb_keysym_to_utf32(keysym); // TODO: double check if it fully mimics gdk_keyval_to_unicode()
-
-          if (utf32) {
-            if (utf32 >= 0x21 && utf32 <= 0x7E) {
-              printf("the key %c was %s\n", (char)utf32, type == GDK_KEY_PRESS ? "pressed" : "released");
-            } else {
-              printf("the key U+%04X was %s\n", utf32, type == GDK_KEY_PRESS ? "pressed" : "released");
-            }
-          } else {
-            char name[64];
-            xkb_keysym_get_name(keysym, name, sizeof(name));
-
-            printf("the key %s was %s\n", name, type == GDK_KEY_PRESS ? "pressed" : "released");
-          }
-
-          std::string message;
-
-          // dw: if you do not like so many backslashes,
-          // please consider to rerwite it using RapidJson.
-          message += "{";
-          message += " \"type\":" + std::string(type == GDK_KEY_PRESS ? "\"keydown\"" : "\"keyup\"");
-          message += ",\"keymap\":" + std::string("\"linux\"");
-          message += ",\"scanCode\":" + std::to_string(hardware_keycode);
-          message += ",\"toolkit\":" + std::string("\"gtk\"");
-          message += ",\"keyCode\":" + std::to_string(keysym);
-          message += ",\"modifiers\":" + std::to_string(state);
-          if (utf32) {
-            message += ",\"unicodeScalarValues\":" + std::to_string(utf32);
-          }
-
-          message += "}";
-
-          if (!message.empty()) {
-            bool success = FlutterSendMessage(wd->engine_, "flutter/keyevent", reinterpret_cast<const uint8_t *>(message.c_str()), message.size());
-
-            if (!success) {
-              FLWAY_ERROR << "Error sending PlatformMessage: " << message << std::endl;
-            }
+          if (rv == -1) {
+            printf("ERROR: timerfd_settime returned -1 (errno: %d)\n", errno);
           }
         },
 
@@ -304,7 +240,20 @@ const wl_keyboard_listener WaylandDisplay::kKeyboardListener = {
           xkb_state_update_mask(wd->xkb_state, mods_depressed, mods_latched, mods_locked, group, 0, 0);
         },
 
-    .repeat_info = [](void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay) {},
+    .repeat_info =
+        [](void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay) {
+          WaylandDisplay *const wd = get_wayland_display(data);
+
+          if (rate > 0) {
+            wd->key.repeat_interval_ms_ = 1'000 / rate;
+          }
+
+          if (delay > 0) {
+            wd->key.repeat_delay_ms_ = delay;
+          }
+
+          printf("key.repeat_info delay:%d, rate:%d -> delay:%d[ms], repeat-interval:%d[ms]\n", delay, rate, wd->key.repeat_delay_ms_, wd->key.repeat_interval_ms_);
+        },
 };
 
 const wl_seat_listener WaylandDisplay::kSeatListener = {
@@ -416,6 +365,92 @@ const struct wp_presentation_listener WaylandDisplay::kPresentationListener = {
         },
 };
 
+bool WaylandDisplay::key_handler(const uint32_t key, const uint32_t state_w, const bool is_repeat) {
+  if (keymap_format == WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP) {
+    printf("key: Hmm - no keymap, no key event\n");
+    return false;
+  }
+
+  const xkb_keycode_t hardware_keycode = key + (keymap_format * 8);
+  const xkb_keysym_t keysym            = xkb_state_key_get_one_sym(xkb_state, hardware_keycode);
+
+  if (keysym == XKB_KEY_NoSymbol) {
+    printf("key: Hmm - no key symbol, no key event\n");
+    return false;
+  }
+
+  xkb_mod_mask_t mods = xkb_state_serialize_mods(xkb_state, XKB_STATE_MODS_EFFECTIVE);
+  key_modifiers       = toGDKModifiers(keymap, mods);
+
+  // Remove lock states from state mask.
+  guint state = key_modifiers & ~(GDK_LOCK_MASK | GDK_MOD2_MASK);
+
+  static bool shift_lock_pressed = false;
+  static bool caps_lock_pressed  = false;
+  static bool num_lock_pressed   = false;
+
+  const GdkEventType type = state_w == WL_KEYBOARD_KEY_STATE_PRESSED ? GDK_KEY_PRESS : GDK_KEY_RELEASE;
+
+  switch (keysym) {
+  case GDK_KEY_Num_Lock:
+    num_lock_pressed = type == GDK_KEY_PRESS;
+    break;
+  case GDK_KEY_Caps_Lock:
+    caps_lock_pressed = type == GDK_KEY_PRESS;
+    break;
+  case GDK_KEY_Shift_Lock:
+    shift_lock_pressed = type == GDK_KEY_PRESS;
+    break;
+  }
+
+  // Add back in the state matching the actual pressed state of the lock keys,
+  // not the lock states.
+  state |= (shift_lock_pressed || caps_lock_pressed) ? GDK_LOCK_MASK : 0x0;
+  state |= num_lock_pressed ? GDK_MOD2_MASK : 0x0;
+
+  const uint32_t utf32 = xkb_keysym_to_utf32(keysym); // TODO: double check if it fully mimics gdk_keyval_to_unicode()
+
+  if (utf32) {
+    if (utf32 >= 0x21 && utf32 <= 0x7E) {
+      printf("key: %c %s%s\n", (char)utf32, type == GDK_KEY_PRESS ? "pressed" : "released", is_repeat ? " [r]" : "");
+    } else {
+      printf("key: U+%04X %s%s\n", utf32, type == GDK_KEY_PRESS ? "pressed" : "released", is_repeat ? " [r]" : "");
+    }
+  } else {
+    char name[64];
+    xkb_keysym_get_name(keysym, name, sizeof(name));
+
+    printf("key: %s %s%s\n", name, type == GDK_KEY_PRESS ? "pressed" : "released", is_repeat ? " [r]" : "");
+  }
+
+  std::string message;
+
+  // dw: if you do not like so many backslashes,
+  // please consider to rerwite it using RapidJson.
+  message += "{";
+  message += " \"type\":" + std::string(type == GDK_KEY_PRESS ? "\"keydown\"" : "\"keyup\"");
+  message += ",\"keymap\":" + std::string("\"linux\"");
+  message += ",\"scanCode\":" + std::to_string(hardware_keycode);
+  message += ",\"toolkit\":" + std::string("\"gtk\"");
+  message += ",\"keyCode\":" + std::to_string(keysym);
+  message += ",\"modifiers\":" + std::to_string(state);
+  if (utf32) {
+    message += ",\"unicodeScalarValues\":" + std::to_string(utf32);
+  }
+
+  message += "}";
+
+  if (!message.empty()) {
+    bool success = FlutterSendMessage(engine_, "flutter/keyevent", reinterpret_cast<const uint8_t *>(message.c_str()), message.size());
+
+    if (!success) {
+      FLWAY_ERROR << "Error sending PlatformMessage: " << message << std::endl;
+    }
+  }
+
+  return xkb_keymap_key_repeats(keymap, hardware_keycode) && type == GDK_KEY_PRESS;
+}
+
 WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &bundle_path, const std::vector<std::string> &command_line_args)
     : xkb_context(xkb_context_new(XKB_CONTEXT_NO_FLAGS))
     , screen_width_(width)
@@ -427,6 +462,13 @@ WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &b
 
   if (socketpair(AF_LOCAL, SOCK_DGRAM | SOCK_CLOEXEC, 0, &sv_[0]) == -1) {
     FLWAY_ERROR << "socketpair() failed, errno: " << errno << std::endl;
+    return;
+  }
+
+  key.timer_fd_ = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+
+  if (key.timer_fd_ < 0) {
+    FLWAY_ERROR << "Could not create timer." << std::endl;
     return;
   }
 
@@ -780,9 +822,10 @@ bool WaylandDisplay::Run() {
     do {
       int rv;
 
-      struct pollfd fds[2] = {
+      struct pollfd fds[3] = {
           {.fd = sv_[SOCKET_READER], .events = POLLIN},
           {.fd = fd, .events = POLLIN | POLLERR},
+          {.fd = key.timer_fd_, .events = POLLIN | POLLERR},
       };
 
       do {
@@ -797,6 +840,20 @@ bool WaylandDisplay::Run() {
       if (rv == -1) {
         printf("ERROR: ppoll returned -1 (errno: %d)\n", errno);
         return false;
+      }
+
+      if (fds[2].revents & POLLIN) {
+        uint64_t count;
+        do {
+          rv = read(fds[2].fd, &count, sizeof count);
+        } while (rv == -1 && errno == EINTR);
+
+        if (rv == -1) {
+          printf("ERROR: read returned -1 (errno: %d)\n", errno);
+          return false;
+        }
+
+        key_handler(key.last_, key.state_, true);
       }
 
       if (fds[0].revents & POLLIN) {

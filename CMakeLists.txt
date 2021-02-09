@@ -29,6 +29,8 @@ else()
   set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
 
+set (CMAKE_CXX_FLAGS "-Wpedantic -Wall -Wextra -Woverloaded-virtual -Wno-unused-parameter -Wno-c++20-designator ${CMAKE_CXX_FLAGS}")
+
 set(SOURCES
     src/main.cc
     src/elf.cc

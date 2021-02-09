@@ -11,6 +11,8 @@
 
 namespace flutter {
 
+constexpr auto NSEC_PER_SEC = 1'000'000'000;
+
 std::string GetICUDataPath();
 
 std::string GetExecutableName();
@@ -26,4 +28,14 @@ std::string FlutterGetAppAotElfName();
 bool FlutterSendMessage(FlutterEngine engine, const char *channel, const uint8_t *message, const size_t message_size);
 
 template <typename T> T getEnv(const char *variable, T default_value);
+
+static inline void timespec_from_nsec(struct timespec *a, int64_t b) {
+  a->tv_sec  = b / NSEC_PER_SEC;
+  a->tv_nsec = b % NSEC_PER_SEC;
+}
+
+static inline void timespec_from_msec(struct timespec *a, int64_t b) {
+  timespec_from_nsec(a, b * 1'000'000);
+}
+
 } // namespace flutter
