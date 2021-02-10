@@ -101,15 +101,17 @@ private:
   } key;
 
   // vsync related {
-  uint32_t presentation_clk_id_     = UINT32_MAX;
-  std::atomic<intptr_t> baton_      = 0;
-  std::atomic<uint64_t> last_frame_ = 0;
-  uint64_t vblank_time_ns_          = 1000000000000 / 60000;
+  struct {
+    uint32_t presentation_clk_id_     = UINT32_MAX;
+    std::atomic<intptr_t> baton_      = 0;
+    std::atomic<uint64_t> last_frame_ = 0;
+    uint64_t vblank_time_ns_          = 1'000'000'000'000 / 60'000;
+    enum { SOCKET_WRITER = 0, SOCKET_READER };
+    int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
+  } vsync;
   ssize_t vSyncHandler();
-  enum { SOCKET_WRITER = 0, SOCKET_READER };
-  int sv_[2] = {-1, -1}; // 0-index is for sending, 1-index is for reading
-  ssize_t sendNotifyData();
-  ssize_t readNotifyData();
+  ssize_t vSyncSendNotifyData();
+  ssize_t vSyncReadNotifyData();
   // }
 
   FLWAY_DISALLOW_COPY_AND_ASSIGN(WaylandDisplay)

@@ -166,7 +166,7 @@ const wl_pointer_listener WaylandDisplay::kPointerListener = {
           FlutterPointerEvent event = {
               .struct_size    = sizeof(event),
               .phase          = state == WL_POINTER_BUTTON_STATE_PRESSED ? FlutterPointerPhase::kDown : FlutterPointerPhase::kUp,
-              .timestamp      = time * 1000,
+              .timestamp      = time * 1'000,
               .x              = wl_fixed_to_double(wd->surface_x),
               .y              = wl_fixed_to_double(wd->surface_y),
               .device         = 0,
@@ -302,7 +302,7 @@ const wl_output_listener WaylandDisplay::kOutputListener = {
         [](void *data, struct wl_output *wl_output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          wd->vblank_time_ns_ = 1000000000000 / refresh;
+          wd->vsync.vblank_time_ns_ = 1'000'000'000'000 / refresh;
 
           printf("output.mode(data:%p, wl_output:%p, flags:%d, width:%d->%d, height:%d->%d, refresh:%d)\n", data, static_cast<void *>(wl_output), flags, wd->screen_width_, width, wd->screen_height_, height, refresh);
 
@@ -334,18 +334,18 @@ const struct wp_presentation_feedback_listener WaylandDisplay::kPresentationFeed
         [](void *data, struct wp_presentation_feedback *wp_presentation_feedback, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec, uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          const uint64_t new_last_frame_ns = (((static_cast<uint64_t>(tv_sec_hi) << 32) + tv_sec_lo) * 1000000000) + tv_nsec;
+          const uint64_t new_last_frame_ns = (((static_cast<uint64_t>(tv_sec_hi) << 32) + tv_sec_lo) * 1'000'000'000) + tv_nsec;
 
-          if (refresh != wd->vblank_time_ns_) {
+          if (refresh != wd->vsync.vblank_time_ns_) {
             static auto displayed = false;
 
             if (!displayed) {
-              printf("WARN: Variable display rate output: vblank_time_ns: %ju refresh: %u\n", wd->vblank_time_ns_, refresh);
+              printf("WARN: Variable display rate output: vblank_time_ns: %ju refresh: %u\n", wd->vsync.vblank_time_ns_, refresh);
               displayed = true;
             }
           }
 
-          wd->last_frame_ = new_last_frame_ns;
+          wd->vsync.last_frame_ = new_last_frame_ns;
         },
     .discarded =
         [](void *data, struct wp_presentation_feedback *wp_presentation_feedback) {
@@ -359,7 +359,7 @@ const struct wp_presentation_listener WaylandDisplay::kPresentationListener = {
         [](void *data, struct wp_presentation *wp_presentation, uint32_t clk_id) {
           WaylandDisplay *const wd = get_wayland_display(data);
 
-          wd->presentation_clk_id_ = clk_id;
+          wd->vsync.presentation_clk_id_ = clk_id;
 
           printf("presentation.clk_id: %u\n", clk_id);
         },
@@ -460,7 +460,7 @@ WaylandDisplay::WaylandDisplay(size_t width, size_t height, const std::string &b
     return;
   }
 
-  if (socketpair(AF_LOCAL, SOCK_DGRAM | SOCK_CLOEXEC, 0, &sv_[0]) == -1) {
+  if (socketpair(AF_LOCAL, SOCK_DGRAM | SOCK_CLOEXEC, 0, &vsync.sv_[0]) == -1) {
     FLWAY_ERROR << "socketpair() failed, errno: " << errno << std::endl;
     return;
   }
@@ -592,14 +592,14 @@ bool WaylandDisplay::SetupEngine(const std::string &bundle_path, const std::vect
       .vsync_callback    = [](void *data, intptr_t baton) -> void {
         WaylandDisplay *const wd = get_wayland_display(data);
 
-        if (wd->baton_ != 0) {
+        if (wd->vsync.baton_ != 0) {
           printf("ERROR: vsync.wait: New baton arrived, but old was not sent.\n");
           exit(1);
         }
 
-        wd->baton_ = baton;
+        wd->vsync.baton_ = baton;
 
-        if (wd->sendNotifyData() != 1) {
+        if (wd->vSyncSendNotifyData() != 1) {
           exit(1);
         }
       },
@@ -730,16 +730,16 @@ bool WaylandDisplay::IsValid() const {
 }
 
 ssize_t WaylandDisplay::vSyncHandler() {
-  if (baton_ == 0) {
+  if (vsync.baton_ == 0) {
     return 0;
   }
 
   const auto t_now_ns                      = FlutterEngineGetCurrentTime();
-  const uint64_t after_vsync_time_ns       = (t_now_ns - last_frame_) % vblank_time_ns_;
-  const uint64_t before_next_vsync_time_ns = vblank_time_ns_ - after_vsync_time_ns;
+  const uint64_t after_vsync_time_ns       = (t_now_ns - vsync.last_frame_) % vsync.vblank_time_ns_;
+  const uint64_t before_next_vsync_time_ns = vsync.vblank_time_ns_ - after_vsync_time_ns;
   const uint64_t current_ns                = t_now_ns + before_next_vsync_time_ns;
-  const uint64_t finish_time_ns            = current_ns + vblank_time_ns_;
-  intptr_t baton                           = std::atomic_exchange(&baton_, 0);
+  const uint64_t finish_time_ns            = current_ns + vsync.vblank_time_ns_;
+  intptr_t baton                           = std::atomic_exchange(&vsync.baton_, 0);
 
   const auto status = FlutterEngineOnVsync(engine_, baton, current_ns, finish_time_ns);
 
@@ -755,21 +755,21 @@ const struct wl_callback_listener WaylandDisplay::kFrameListener = {.done = [](v
   WaylandDisplay *const wd = get_wayland_display(data);
 
   /* check if we presentation time extension interface working */
-  if (wd->presentation_clk_id_ != UINT32_MAX) {
+  if (wd->vsync.presentation_clk_id_ != UINT32_MAX) {
     return;
   }
 
-  wd->last_frame_ = FlutterEngineGetCurrentTime();
+  wd->vsync.last_frame_ = FlutterEngineGetCurrentTime();
   wl_callback_destroy(cb);
   wl_callback_add_listener(wl_surface_frame(wd->surface_), &kFrameListener, data);
 }};
 
-ssize_t WaylandDisplay::readNotifyData() {
+ssize_t WaylandDisplay::vSyncReadNotifyData() {
   ssize_t rv;
 
   do {
     char c;
-    rv = read(sv_[SOCKET_READER], &c, sizeof c);
+    rv = read(vsync.sv_[vsync.SOCKET_READER], &c, sizeof c);
   } while (rv == -1 && errno == EINTR);
 
   if (rv != 1) {
@@ -779,14 +779,14 @@ ssize_t WaylandDisplay::readNotifyData() {
   return rv;
 }
 
-ssize_t WaylandDisplay::sendNotifyData() {
+ssize_t WaylandDisplay::vSyncSendNotifyData() {
   static unsigned char c = 0;
   ssize_t rv;
 
   c++;
 
   do {
-    rv = write(sv_[SOCKET_WRITER], &c, sizeof c);
+    rv = write(vsync.sv_[vsync.SOCKET_WRITER], &c, sizeof c);
   } while (rv == -1 && errno == EINTR);
 
   if (rv != 1) {
@@ -823,7 +823,7 @@ bool WaylandDisplay::Run() {
       int rv;
 
       struct pollfd fds[3] = {
-          {.fd = sv_[SOCKET_READER], .events = POLLIN},
+          {.fd = vsync.sv_[vsync.SOCKET_READER], .events = POLLIN},
           {.fd = fd, .events = POLLIN | POLLERR},
           {.fd = key.timer_fd_, .events = POLLIN | POLLERR},
       };
@@ -857,13 +857,13 @@ bool WaylandDisplay::Run() {
       }
 
       if (fds[0].revents & POLLIN) {
-        auto rv = readNotifyData();
+        auto rv = vSyncReadNotifyData();
 
         if (rv != 1) {
           return false;
         }
 
-        if (presentation_clk_id_ != UINT32_MAX && presentation_ != nullptr) {
+        if (vsync.presentation_clk_id_ != UINT32_MAX && presentation_ != nullptr) {
           wp_presentation_feedback_add_listener(::wp_presentation_feedback(presentation_, surface_), &kPresentationFeedbackListener, this);
           wl_display_dispatch_pending(display_);
         }
